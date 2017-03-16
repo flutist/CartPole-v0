@@ -1,9 +1,13 @@
+# this is the version of tensoflow
 import random, numpy, math, gym
 from keras.models import Sequential
 from keras.layers import *
 from keras.optimizers import *
 import keras
 import matplotlib.pyplot as plt
+import tensorflow as tf
+import tensorflow.contrib.slim as slim
+import time
 
 # hyper params
 MEMORY_CAPACITY = 100000
@@ -16,36 +20,48 @@ MIN_EPSILON = 0.01
 LAMBDA = 0.001
 
 PROBLEM = 'CartPole-v0'
-
+logDir = "logs/" + time.strftime("%Y%m%d%H%M%S", time.localtime())
+totalSteps = 0
 
 class Network:
-    def __init__(self, stateSize, actionSize, loadModel = False, modelFilename="cartpole-basic.h5" ):
+    sess = None
+    logWriter = None
+    def __init__(self, stateSize, actionSize):
         self.stateSize = stateSize
         self.actionSize = actionSize
 
-        self.model = self._createModel()
-        if loadModel:
-            self.model.load_weights(modelFilename)
+        self._createModel()
 
     def _createModel(self):
-        model = Sequential()
 
-        model.add(Dense(64, activation='relu', input_dim=self.stateSize))
-        model.add(Dense(self.actionSize, activation='linear'))
+        self.input = tf.placeholder('float', shape=[None,self.stateSize])
+        x1 = slim.fully_connected(self.input, 64, scope='fc/fc_1')
+        x1 = tf.nn.relu(x1)
+        self.Qout = slim.fully_connected(x1, self.actionSize)
 
-        opt = RMSprop(lr=0.00025)
-        model.compile(loss='mse', optimizer=opt)
+        self.tdTarget = tf.placeholder(shape=[None, self.actionSize],dtype=tf.float32)
+        self.loss = tf.reduce_mean(tf.square(self.tdTarget - self.Qout ) )
 
-        return model
+        self.trainer = tf.train.RMSPropOptimizer(learning_rate=0.00025)
+        self.updateModel = self.trainer.minimize(self.loss)
 
-    def train(self, x, y, epoch=1, verbose=0):
-        self.model.fit(x, y, batch_size=64, nb_epoch=epoch, verbose=verbose)
+
+        tdTargetLogger= tf.summary.scalar('tdTarget', tf.reduce_mean(self.tdTarget))
+        lossLogger= tf.summary.scalar('loss', self.loss)
+        self.log = tf.summary.merge([tdTargetLogger, lossLogger])
+
+    def train(self, x, y):
+        graphRun = [self.updateModel, self.log]
+        _, summary = self.sess.run(graphRun,
+                            feed_dict={self.input: x,
+                                       self.tdTarget : y})
+        self.logWriter.add_summary(summary, totalSteps)
 
     def predict(self, s):
-        return self.model.predict(s)
+        return self.sess.run(self.Qout, feed_dict={self.input: s})
 
     def predictOne(self, s):
-        return self.predict(s.reshape(1, self.stateSize)).flatten()
+        return self.sess.run(self.Qout, feed_dict={self.input: [s]}) [0]
 
 class Memory:
     samples = []
@@ -83,6 +99,7 @@ class Agent:
         self.memory.add(sample)
 
         self.steps +=1
+        totalSteps = self.steps
         self.epsilon  = MIN_EPSILON + (MAX_EPSILON - MIN_EPSILON) * math.exp(-LAMBDA * self.steps)
 
     def replay(self):
@@ -117,10 +134,14 @@ class Agent:
         self.network.train(x,y)
 
 class Environment:
+    sess = None
+
     def __init__(self, problem):
         self.problem = problem
         self.env = gym.make(problem)
         self.rewardHistory = []
+        self.episodeRewardTensor = tf.placeholder(tf.float32, name="episodeReward")
+        self.episodeRewardSummary = tf.summary.scalar('episodeReward', self.episodeRewardTensor)
 
     def run(self, agent, testMode= False):
         s = self.env.reset()
@@ -144,11 +165,16 @@ class Environment:
                 break
         if testMode:
             self.rewardHistory.append(R)
-        print("Total reward:", R)
+        else:
+            print("Total reward:", R)
+            return self.sess.run(self.episodeRewardSummary, feed_dict={self.episodeRewardTensor: R })
 
     def plotRewards(self):
         plt.figure()
         plt.plot(self.rewardHistory)
+
+
+
 
 env = Environment(PROBLEM)
 
@@ -156,11 +182,20 @@ stateSize = env.env.observation_space.shape[0]
 actionSize = env.env.action_space.n
 agent = Agent(stateSize, actionSize)
 
-try:
-    for i in range(700):
-        env.run(agent)
+init = tf.global_variables_initializer()
+
+with tf.Session() as sess:
+    writer = tf.summary.FileWriter(logDir, sess.graph)
+    sess.run(init)
+
+    agent.network.sess = sess
+    env.sess = sess
+    agent.network.logWriter = writer
+
+    for i in range(3000):
+        episodeRewardSummary_ = env.run(agent)
         if i % 10 == 0 :
             env.run(agent, True)
+        writer.add_summary(episodeRewardSummary_, i)
     env.plotRewards()
-finally:
-    agent.network.model.save("cartpole-basic.h5")
+    print("-------------done-------------")
