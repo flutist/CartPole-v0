@@ -2,7 +2,7 @@
 import gym
 env = gym.make('CartPole-v0')
 env.reset()
-env.render()
+#env.render()
 import os
 import numpy as np
 import random
@@ -144,6 +144,7 @@ with tf.Session() as sess:
     writer = tf.summary.FileWriter(logDir, sess.graph)
     totalStep = 0
     sess.run(init)
+    rewardLog = []
     for episode in range(num_episodes):      
         done = False
         observation = env.reset()
@@ -151,7 +152,7 @@ with tf.Session() as sess:
         
         episodeReward = 0
         while not done:    
-            env.render()
+#            env.render()
             action, qValues, qSummery =agent.predictAction(observation, env)            
             writer.add_summary(qSummery, totalStep)
             new_observation, reward, done, info = env.step(action[0])
@@ -169,8 +170,10 @@ with tf.Session() as sess:
         episodeRewardSummary_ = sess.run(episodeRewardSummary,
                     feed_dict={episodeRewardTensor: episodeReward })
         writer.add_summary(episodeRewardSummary_, totalStep)
+        rewardLog.append(episodeReward)
             
         if episode%100 == 0:
             print("episode " + str(episode) + " .with total reward "+str(episodeReward)     )
     print("training end ")        
     env.close()
+    plt.plot(rewardLog)
