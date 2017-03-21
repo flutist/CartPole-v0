@@ -27,7 +27,7 @@ class Brian:
        with tf.variable_scope(self.scope):
            self.inputs = tf.placeholder('float', shape=[None,self.stateSize])
            x1 = slim.fully_connected(
-               self.input,
+               self.inputs,
                64,
                scope='fc/fc_1',
                activation_fn=tf.nn.relu)
@@ -89,7 +89,7 @@ class Brian:
        op_holder = []
        for from_var,to_var in zip(from_vars,to_vars):
            op_holder.append(to_var.assign(from_var))
-   return op_holder
+       return op_holder
 
    def train(self, states, action, target_v, advantages):
        feed_dict = {
@@ -129,7 +129,7 @@ class Agent:
         self.brian = Brian(stateSize, actionSize, self.name, trainer, sess)
         self.buffer = []
 
-    def train(self, gamma=0.99, bootstrap_value):
+    def train(self, gamma=0.99, bootstrap_value=[]):
         '''
         gamma is the dicount factor
         bootstrap_value is the reward of the final action, it can be bootstraped or a final actual value
@@ -145,7 +145,7 @@ class Agent:
         discounted_rewards = Brian.discount(rewards_plus, gamma)
         value_plus = np.asarray(v.tolist() + [bootstrap_value])
 
-        advantages = rewards + gamma * self.value_plus[1:] - self.value_plus[:-1]
+        advantages = r + gamma * self.value_plus[1:] - value_plus[:-1]
         advantages = Brian.discount(advantages,gamma)
 
         r_l, p_l, e_l, g_n, v_n = self.brian.train(s, a, discounted_rewards, advantages)
