@@ -44,7 +44,7 @@ class Brian:
            self.update_local_ops = Brian.update_target_graph('global',self.scope)
 
            if self.scope != 'global':
-               self.actions = tf.placeholder('float', shape=[None])
+               self.actions = tf.placeholder( shape=[None], dtype=tf.int32)
                self.actions_onehot = tf.one_hot(self.actions, self.actionSize, dtype=tf.float32)
                self.target_v = tf.placeholder(shape=[None],dtype=tf.float32)
                self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
@@ -68,7 +68,7 @@ class Brian:
                self.apply_grads = self.trainer.apply_gradients(zip(grads,global_vars))
 
 
-   @classmethod
+   @staticmethod
    def normalized_columns_initializer(std=1.0):
        def _initializer(shape, dtype=None, partition_info=None):
            out = np.random.randn(*shape).astype(np.float32)
@@ -77,11 +77,11 @@ class Brian:
        return _initializer
 
    # Discounting function used to calculate discounted returns.
-   @classmethod
+   @staticmethod
    def discount(x, gamma):
         return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
 
-   @classmethod
+   @staticmethod
    def update_target_graph(from_scope,to_scope):
        from_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, from_scope)
        to_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, to_scope)
@@ -93,11 +93,18 @@ class Brian:
 
    def train(self, states, action, target_v, advantages):
        feed_dict = {
-           self.brian.inputs : states,
-           self.brian.actions : action,
-           self.brian.target_v : target_v,
-           self.brian.advantages : advantages
+           self.inputs : states,
+           self.actions : action,
+           self.target_v : target_v,
+           self.advantages : advantages
        }
+       #@TODO turn states into muti dim array
+       print(np.array(states))
+       print(action)
+       print(target_v)
+       print(advantages)
+       print("-")
+       
        return self.sess.run([
          self.value_loss,
          self.policy_loss,
@@ -107,7 +114,7 @@ class Brian:
        ], feed_dict=feed_dict)
 
    def predict(self, state):
-       return self.sess.run([self.value, self.policy],
+       return self.sess.run([self.policy, self.value],
                             feed_dict={self.inputs: state})
 
    def update_ops(self):
@@ -117,7 +124,7 @@ class Brian:
        a_dist, v_dist = self.predict(s.reshape(1, self.stateSize))
        a = np.random.choice(a_dist[0],p=a_dist[0])
        a = np.argmax(a_dist == a)
-       return a, v_dist[0]
+       return a, v_dist.flatten()[0]
 
 
 
@@ -129,7 +136,7 @@ class Agent:
         self.brian = Brian(stateSize, actionSize, self.name, trainer, sess)
         self.buffer = []
 
-    def train(self, gamma=0.99, bootstrap_value=[]):
+    def train(self, gamma, bootstrap_value):
         '''
         gamma is the dicount factor
         bootstrap_value is the reward of the final action, it can be bootstraped or a final actual value
@@ -145,10 +152,13 @@ class Agent:
         discounted_rewards = Brian.discount(rewards_plus, gamma)
         value_plus = np.asarray(v.tolist() + [bootstrap_value])
 
-        advantages = r + gamma * self.value_plus[1:] - value_plus[:-1]
+        advantages = r + gamma * value_plus[1:] - value_plus[:-1]
         advantages = Brian.discount(advantages,gamma)
 
         r_l, p_l, e_l, g_n, v_n = self.brian.train(s, a, discounted_rewards, advantages)
+        
+        #clear buffer
+        self.buffer=[]
         return r_l, p_l, e_l, g_n, v_n
 
     def update_ops(self):
@@ -158,7 +168,7 @@ class Agent:
         self.buffer.append(sample)
 
     def act(self, state):
-        return self.brian.predictOne()
+        return self.brian.predictOne(state)
 
     def isBufferFulled(self):
         return len(self.buffer) >= self.MAX_BUFFER_SIZE
@@ -170,6 +180,7 @@ class Agent:
 class Environment:
     def __init__(self):
         self.env = gym.make(PROBLEM)
+        print("start "+PROBLEM)
 
     def run(self, agent):
         s = self.env.reset()
@@ -180,10 +191,12 @@ class Environment:
 
             s_, r, done, info = self.env.step(a)
 
-            agent.observe((s, a, r, s_, d, v))
+            agent.observe((s, a, r, s_, done, v))
 
             if agent.isBufferFulled() or done:
-                agent.train()
+                a_, v_ = agent.act(s_)
+                print(v_)
+                agent.train(0.99, v_)
                 agent.update_ops()
 
             s = s_
@@ -214,7 +227,7 @@ class Worker:
         self.name = "worker_" +  str(number)
         self.summary_writer = tf.summary.FileWriter("train_"+str(self.name))
 
-        self.agent = Agent()
+        self.agent = Agent(s_size, a_size, self.name, self.trainer, sess)
         self.env = Environment()
 
 
@@ -265,13 +278,16 @@ with tf.Session() as sess:
     for i in range(NU_THREADS):
         worker = Worker(max_episode_length,GAMMA,sess,coord, saver, global_episodes, trainer, stateSize, actionSize, MODEL_PATH, i )
         workers.append(worker)
-        work = lambda: worker.run()
-        t = threading.Thread(target=(work))
-        workers.append(work)
-        threads.append(t)
+        
+#        work = lambda: worker.run()
+#        t = threading.Thread(target=(work))
+#        workers.append(work)
+#        threads.append(t)
 
     # init vars
     sess.run(tf.global_variables_initializer())
+    
+    workers[0].run()
 
     for t in threads:
         t.start()
