@@ -98,12 +98,6 @@ class Brian:
            self.target_v : target_v,
            self.advantages : advantages
        }
-       #@TODO turn states into muti dim array
-       print(np.array(states))
-       print(action)
-       print(target_v)
-       print(advantages)
-       print("-")
        
        return self.sess.run([
          self.value_loss,
@@ -141,15 +135,18 @@ class Agent:
         gamma is the dicount factor
         bootstrap_value is the reward of the final action, it can be bootstraped or a final actual value
         '''
-        rollout = np.array(self.buffer)
-        s  = rollout[:,0]
-        a  = rollout[:,1]
-        r  = rollout[:,2]
-        s_ = rollout[:,3]
-        v  = rollout[:,5]
+        rollout = self.buffer
+#        s  = rollout[:,0]
+        s = np.array([ o[0] for o in rollout])
+        a = np.array([ o[1] for o in rollout])
+        
+#        a  = rollout[:,1]
+        r  = np.array([ o[2] for o in rollout])
+        s_ = np.array([ o[3] for o in rollout])
+        v  = np.array([ o[5] for o in rollout])
 
         rewards_plus = np.asarray(r.tolist() + [bootstrap_value])
-        discounted_rewards = Brian.discount(rewards_plus, gamma)
+        discounted_rewards = Brian.discount(rewards_plus, gamma)[:-1]
         value_plus = np.asarray(v.tolist() + [bootstrap_value])
 
         advantages = r + gamma * value_plus[1:] - value_plus[:-1]
@@ -173,18 +170,45 @@ class Agent:
     def isBufferFulled(self):
         return len(self.buffer) >= self.MAX_BUFFER_SIZE
 
-    def episodeEnd(self):
-        self.train()
+    def episodeEnd(self, gamma, bootstrap_value):
+        if(len(self.buffer)==0):
+            return 0,0,0,0,0
+        return self.train(gamma, bootstrap_value)
 
 
 class Environment:
     def __init__(self):
         self.env = gym.make(PROBLEM)
         print("start "+PROBLEM)
+        
+        self.r_l = []
+        self.p_l = []
+        self.e_l = []
+        self.g_n = []
+        self.v_n = []
+    
+    def addLogBuffer(self, r_l, p_l, e_l, g_n, v_n):        
+        if v_n == None:
+            v_n = 0
+        self.r_l.append(r_l)
+        self.p_l.append(p_l)
+        self.e_l.append(e_l)
+        self.g_n.append(g_n)
+        self.v_n.append(v_n)
+        
+    def getMeanBuffer(self):
+        t = self
+        return np.mean(self.r_l), np.mean(self.p_l), np.mean(self.e_l), np.mean(self.g_n), np.mean(self.v_n), 
 
     def run(self, agent):
         s = self.env.reset()
         R = 0
+        
+        self.r_l = []
+        self.p_l = []
+        self.e_l = []
+        self.g_n = []
+        self.v_n = []
 
         while True:
             a, v = agent.act(s)
@@ -195,8 +219,8 @@ class Environment:
 
             if agent.isBufferFulled() or done:
                 a_, v_ = agent.act(s_)
-                print(v_)
-                agent.train(0.99, v_)
+                r_l, p_l, e_l, g_n, v_n = agent.train(0.99, v_)
+                self.addLogBuffer(r_l, p_l, e_l, g_n, v_n)
                 agent.update_ops()
 
             s = s_
@@ -204,7 +228,11 @@ class Environment:
 
             if done:
                 break
-        agent.episodeEnd()
+        r_l, p_l, e_l, g_n, v_n = agent.episodeEnd(0.99, 0)
+        self.addLogBuffer(r_l, p_l, e_l, g_n, v_n)
+        r_l_m, p_l_m, e_l_m, g_n_m, v_n_m = self.getMeanBuffer()
+        agent.update_ops()
+        return R, r_l_m, p_l_m, e_l_m, g_n_m, v_n_m
 
 class Worker:
     '''
@@ -224,41 +252,62 @@ class Worker:
         self.s_size = s_size
         self.a_size = a_size
         self.model_path = model_path
+        print("created worker ", number)
+        print("id(self) ",id(self))
         self.name = "worker_" +  str(number)
-        self.summary_writer = tf.summary.FileWriter("train_"+str(self.name))
+        self.summary_writer = tf.summary.FileWriter("logs/train_"+str(self.name))
 
         self.agent = Agent(s_size, a_size, self.name, self.trainer, sess)
         self.env = Environment()
 
 
     def run(self):
+        print("Starting worker " + str(self.name))
+        print("Starting self.agent.name " + str(self.agent.name))
+        print("id(self) ",id(self))
         agent = self.agent
 
         self.episode_count = sess.run(self.global_episodes)
-        print("Starting worker " + str(self.name))
 
         with sess.as_default(), sess.graph.as_default():
             while not coord.should_stop():
-                self.env.run(agent)
+                R, r_l, p_l, e_l, g_n, v_n = self.env.run(agent)
                 if self.episode_count % 5 == 0 and self.episode_count!=0:
-                    self.log()
+                    self.log(R, r_l, p_l, e_l, g_n, v_n)
                 if self.episode_count > TOTAL_EPISODE:
                     coord.request_stop()
                 self.episode_count += 1
 
-    def log(self):
+    def log(self, rewards, v_l, p_l, e_l, g_n, v_n):
+        print(str(self.name), " episode_count", self.episode_count)
+        summary = tf.Summary()
+        summary.value.add(tag='Perf/Reward', simple_value=float(rewards))
+#        summary.value.add(tag='Perf/Length', simple_value=float(mean_length))
+#        summary.value.add(tag='Perf/Value', simple_value=float(mean_value))
+        summary.value.add(tag='Losses/Value Loss', simple_value=float(v_l))
+        summary.value.add(tag='Losses/Policy Loss', simple_value=float(p_l))
+        summary.value.add(tag='Losses/Entropy', simple_value=float(e_l))
+        summary.value.add(tag='Losses/Grad Norm', simple_value=float(g_n))
+        summary.value.add(tag='Losses/Var Norm', simple_value=float(v_n))
+        self.summary_writer.add_summary(summary, self.episode_count)
+
+        self.summary_writer.flush()
         pass
 
 
 stateSize = 4
 actionSize = 2
 GAMMA = 0.99
-TOTAL_EPISODE = 500
+TOTAL_EPISODE = 50000
 PROBLEM = 'CartPole-v0'
 MODEL_PATH = "./model"
 max_episode_length = 200
 NU_THREADS = multiprocessing.cpu_count()
-NU_THREADS = 1
+#NU_THREADS = 2
+
+SINGLE_THREAD = False
+
+print("NU_THREADS " + str(NU_THREADS))
 
 tf.reset_default_graph()
 
@@ -276,20 +325,26 @@ with tf.Session() as sess:
     workers = []        # the worker object
 
     for i in range(NU_THREADS):
+        print("create worker ", i)
         worker = Worker(max_episode_length,GAMMA,sess,coord, saver, global_episodes, trainer, stateSize, actionSize, MODEL_PATH, i )
+        print("worker id(self) ",id(worker))
+        print('-----------')
         workers.append(worker)
-        
-#        work = lambda: worker.run()
-#        t = threading.Thread(target=(work))
-#        workers.append(work)
-#        threads.append(t)
 
     # init vars
     sess.run(tf.global_variables_initializer())
-    
-    workers[0].run()
+    print("*******************************")
 
-    for t in threads:
-        t.start()
-        sleep(0.5)
-    coord.join(threads)
+    if SINGLE_THREAD:
+        workers[0].run()
+    else:    
+        for i in range(NU_THREADS):
+            work = lambda: workers[i].run()
+            t = threading.Thread(target=(work))
+            t.start()
+            threads.append(t)
+            print("workers[i].name ",workers[i].name)
+            print("threads[i] id(t) ",id(t))
+            print('-----------')
+            sleep(0.5)
+        coord.join(threads)
