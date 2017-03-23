@@ -79,7 +79,7 @@ class Brian:
    # Discounting function used to calculate discounted returns.
    @staticmethod
    def discount(x, gamma):
-        return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+       return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
 
    @staticmethod
    def update_target_graph(from_scope,to_scope):
@@ -156,7 +156,7 @@ class Agent:
         
         #clear buffer
         self.buffer=[]
-        return r_l, p_l, e_l, g_n, v_n
+        return r_l, p_l, e_l, g_n, v_n, np.mean(advantages)
 
     def update_ops(self):
         self.brian.update_ops()
@@ -172,7 +172,7 @@ class Agent:
 
     def episodeEnd(self, gamma, bootstrap_value):
         if(len(self.buffer)==0):
-            return 0,0,0,0,0
+            return None, None, None, None, None, None
         return self.train(gamma, bootstrap_value)
 
 
@@ -186,8 +186,9 @@ class Environment:
         self.e_l = []
         self.g_n = []
         self.v_n = []
+        self.mean_advantages = []
     
-    def addLogBuffer(self, r_l, p_l, e_l, g_n, v_n):        
+    def addLogBuffer(self, r_l, p_l, e_l, g_n, v_n, mean_advantages):        
         if v_n == None:
             v_n = 0
         self.r_l.append(r_l)
@@ -195,10 +196,10 @@ class Environment:
         self.e_l.append(e_l)
         self.g_n.append(g_n)
         self.v_n.append(v_n)
+        self.mean_advantages.append(mean_advantages)
         
     def getMeanBuffer(self):
-        t = self
-        return np.mean(self.r_l), np.mean(self.p_l), np.mean(self.e_l), np.mean(self.g_n), np.mean(self.v_n), 
+        return np.mean(self.r_l), np.mean(self.p_l), np.mean(self.e_l), np.mean(self.g_n), np.mean(self.v_n),   np.mean(self.mean_advantages)
 
     def run(self, agent):
         s = self.env.reset()
@@ -209,6 +210,7 @@ class Environment:
         self.e_l = []
         self.g_n = []
         self.v_n = []
+        self.mean_advantages = []
 
         while True:
             a, v = agent.act(s)
@@ -219,8 +221,8 @@ class Environment:
 
             if agent.isBufferFulled() or done:
                 a_, v_ = agent.act(s_)
-                r_l, p_l, e_l, g_n, v_n = agent.train(0.99, v_)
-                self.addLogBuffer(r_l, p_l, e_l, g_n, v_n)
+                r_l, p_l, e_l, g_n, v_n, mean_advantages = agent.train(0.99, v_)
+                self.addLogBuffer(r_l, p_l, e_l, g_n, v_n, mean_advantages)
                 agent.update_ops()
 
             s = s_
@@ -228,11 +230,12 @@ class Environment:
 
             if done:
                 break
-        r_l, p_l, e_l, g_n, v_n = agent.episodeEnd(0.99, 0)
-        self.addLogBuffer(r_l, p_l, e_l, g_n, v_n)
-        r_l_m, p_l_m, e_l_m, g_n_m, v_n_m = self.getMeanBuffer()
+        r_l, p_l, e_l, g_n, v_n, mean_advantages = agent.episodeEnd(0.99, 0)
+        if r_l != None:
+            self.addLogBuffer(r_l, p_l, e_l, g_n, v_n, mean_advantages)
+        r_l_m, p_l_m, e_l_m, g_n_m, v_n_m, mean_advantages_m = self.getMeanBuffer()
         agent.update_ops()
-        return R, r_l_m, p_l_m, e_l_m, g_n_m, v_n_m
+        return R, r_l_m, p_l_m, e_l_m, g_n_m, v_n_m, mean_advantages_m
 
 class Worker:
     '''
@@ -271,14 +274,14 @@ class Worker:
 
         with sess.as_default(), sess.graph.as_default():
             while not coord.should_stop():
-                R, r_l, p_l, e_l, g_n, v_n = self.env.run(agent)
+                R, r_l, p_l, e_l, g_n, v_n, mean_advantages_m = self.env.run(agent)
                 if self.episode_count % 5 == 0 and self.episode_count!=0:
-                    self.log(R, r_l, p_l, e_l, g_n, v_n)
+                    self.log(R, r_l, p_l, e_l, g_n, v_n, mean_advantages_m)
                 if self.episode_count > TOTAL_EPISODE:
                     coord.request_stop()
                 self.episode_count += 1
 
-    def log(self, rewards, v_l, p_l, e_l, g_n, v_n):
+    def log(self, rewards, v_l, p_l, e_l, g_n, v_n, mean_advantages_m):
         print(str(self.name), " episode_count", self.episode_count)
         summary = tf.Summary()
         summary.value.add(tag='Perf/Reward', simple_value=float(rewards))
@@ -289,6 +292,7 @@ class Worker:
         summary.value.add(tag='Losses/Entropy', simple_value=float(e_l))
         summary.value.add(tag='Losses/Grad Norm', simple_value=float(g_n))
         summary.value.add(tag='Losses/Var Norm', simple_value=float(v_n))
+        summary.value.add(tag='Losses/mean_advantages_m', simple_value=float(mean_advantages_m))
         self.summary_writer.add_summary(summary, self.episode_count)
 
         self.summary_writer.flush()
@@ -298,7 +302,7 @@ class Worker:
 stateSize = 4
 actionSize = 2
 GAMMA = 0.99
-TOTAL_EPISODE = 50000
+TOTAL_EPISODE = 5000
 PROBLEM = 'CartPole-v0'
 MODEL_PATH = "./model"
 max_episode_length = 200
